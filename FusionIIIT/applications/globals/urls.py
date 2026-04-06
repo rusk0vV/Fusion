@@ -1,4 +1,4 @@
-from django.conf.urls import url, include
+from django.urls import re_path as url, include
 
 from . import views
 
@@ -23,5 +23,6 @@ urlpatterns = [
     # Endpoint to reset all passwords in DEV environment
     url(r'^resetallpass/$', views.reset_all_pass, name='resetallpass'),
     # API urls
-    url(r'^api/', include('applications.globals.api.urls'))
+    url(r'^api/', include('applications.globals.api.urls')),
+    url(r'^update_global_variable/$', views.update_global_variable, name='update_global_var'),
 ]
