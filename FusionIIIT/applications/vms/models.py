@@ -87,6 +87,10 @@ def _generate_pass_number() -> str:
     return f"VMS-{uuid.uuid4().hex[:10].upper()}"
 
 
+def _generate_incident_tracking_number() -> str:
+    return f"INC-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+
+
 class VisitorPass(models.Model):
     PASS_PENDING = "pending"
     PASS_ISSUED = "issued"
@@ -186,6 +190,16 @@ class SecurityIncident(models.Model):
         ("other", "Other"),
     )
 
+    RESPONSE_STANDARD = "standard_response"
+    RESPONSE_HIGH = "high_severity_response"
+    RESPONSE_LOW = "low_severity_response"
+
+    RESPONSE_PROTOCOLS = (
+        (RESPONSE_STANDARD, "Standard Response"),
+        (RESPONSE_HIGH, "High Severity Response"),
+        (RESPONSE_LOW, "Low Severity Response"),
+    )
+
     visitor = models.ForeignKey(Visitor, on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
     visit = models.ForeignKey(Visit, on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
     recorded_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_incidents")
@@ -193,14 +207,123 @@ class SecurityIncident(models.Model):
     issue_type = models.CharField(max_length=40, choices=ISSUE_TYPES, default="other")
     description = models.TextField()
     status = models.CharField(max_length=20, default="open")
+    escalation_level = models.PositiveSmallIntegerField(default=1)
+    notified_authorities = models.JSONField(default=list, blank=True)
+    containment_actions = models.JSONField(default=list, blank=True)
+    response_protocol = models.CharField(max_length=30, choices=RESPONSE_PROTOCOLS, default=RESPONSE_STANDARD)
+    tracking_number = models.CharField(max_length=32, unique=True, null=True, blank=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+    audit_log = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Incident {self.id} ({self.severity})"
 
+    def save(self, *args, **kwargs):
+        if not self.tracking_number:
+            self.tracking_number = _generate_incident_tracking_number()
+        super().save(*args, **kwargs)
+
     @property
     def requires_escalation(self) -> bool:
         return self.severity in {self.SEVERITY_CRITICAL, self.SEVERITY_HIGH}
+
+
+class SystemConfig(models.Model):
+    CATEGORY_GENERAL = "general"
+    CATEGORY_INTEGRATION = "integration"
+
+    CATEGORIES = (
+        (CATEGORY_GENERAL, "General"),
+        (CATEGORY_INTEGRATION, "Integration"),
+    )
+
+    key = models.CharField(max_length=80, unique=True)
+    value = models.TextField()
+    description = models.CharField(max_length=255, blank=True)
+    category = models.CharField(max_length=20, choices=CATEGORIES, default=CATEGORY_GENERAL)
+    updated_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_configs")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.key}={self.value}"
+
+
+class ConfigChangeLog(models.Model):
+    ACTION_CREATED = "created"
+    ACTION_UPDATED = "updated"
+
+    ACTIONS = (
+        (ACTION_CREATED, "Created"),
+        (ACTION_UPDATED, "Updated"),
+    )
+
+    config = models.ForeignKey(SystemConfig, on_delete=models.CASCADE, related_name="change_logs")
+    old_value = models.TextField(blank=True)
+    new_value = models.TextField()
+    description = models.CharField(max_length=255, blank=True)
+    action = models.CharField(max_length=20, choices=ACTIONS)
+    changed_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_config_changes")
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+
+class ConfigNotificationLog(models.Model):
+    config = models.ForeignKey(SystemConfig, on_delete=models.CASCADE, related_name="notifications")
+    recipients = models.JSONField(default=list, blank=True)
+    sent_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_config_notifications")
+    sent_at = models.DateTimeField(auto_now_add=True)
+    payload = models.JSONField(default=dict, blank=True)
+
+
+class VisitingHoursConfig(models.Model):
+    DAY_CHOICES = (
+        ("monday", "Monday"),
+        ("tuesday", "Tuesday"),
+        ("wednesday", "Wednesday"),
+        ("thursday", "Thursday"),
+        ("friday", "Friday"),
+        ("saturday", "Saturday"),
+        ("sunday", "Sunday"),
+    )
+
+    day = models.CharField(max_length=12, choices=DAY_CHOICES, unique=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    is_holiday = models.BooleanField(default=False)
+    active = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_visiting_hours")
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class AccessZoneConfig(models.Model):
+    name = models.CharField(max_length=80, unique=True)
+    description = models.CharField(max_length=255, blank=True)
+    requires_vip = models.BooleanField(default=False)
+    requires_escort = models.BooleanField(default=False)
+    is_restricted = models.BooleanField(default=False)
+    active = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(ExtraInfo, on_delete=models.SET_NULL, null=True, related_name="vms_access_zones")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class VmsEventLog(models.Model):
+    event_type = models.CharField(max_length=64, db_index=True)
+    reference = models.CharField(max_length=80, blank=True, db_index=True)
+    actor_username = models.CharField(max_length=150, blank=True)
+    visit = models.ForeignKey(Visit, on_delete=models.SET_NULL, null=True, blank=True, related_name="vms_events")
+    visitor = models.ForeignKey(Visitor, on_delete=models.SET_NULL, null=True, blank=True, related_name="vms_events")
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        suffix = f" ({self.reference})" if self.reference else ""
+        return f"{self.event_type}{suffix}"
 
 
 def calculate_valid_until(start_time: timezone.datetime, duration_minutes: int, is_vip: bool = False) -> timezone.datetime:
